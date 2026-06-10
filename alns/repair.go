@@ -134,12 +134,20 @@ func RegretInsert(sol *model.Solution, removed []int, nodes []*model.Node, mtx *
 
 func findBestInsert(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *model.Matrix) insertPos {
 	best := insertPos{routeIdx: -1, pos: -1, cost: math.MaxFloat64}
+	nd := nodes[nodeIdx]
+	nodeIsFrozen := nd.TempZone == model.TempZoneFrozen
 
 	for ri, r := range sol.Routes {
-		if r.LoadW+nodes[nodeIdx].Demand > r.Vehicle.CapWeight {
+		if r.LoadW+nd.Demand > r.Vehicle.CapWeight {
 			continue
 		}
-		if r.LoadV+nodes[nodeIdx].Volume > r.Vehicle.CapVolume {
+		if r.LoadV+nd.Volume > r.Vehicle.CapVolume {
+			continue
+		}
+		if nodeIsFrozen && r.Vehicle.CapFrozen > 0 && r.LoadFrozen+nd.Volume > r.Vehicle.CapFrozen {
+			continue
+		}
+		if !nodeIsFrozen && r.Vehicle.CapChilled > 0 && r.LoadChilled+nd.Volume > r.Vehicle.CapChilled {
 			continue
 		}
 		for pos := 0; pos <= len(r.Nodes); pos++ {
@@ -155,12 +163,20 @@ func findBestInsert(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *
 
 func findAllInsertsBuf(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *model.Matrix, buf *[]insertPos) []insertPos {
 	inserts := (*buf)[:0]
+	nd := nodes[nodeIdx]
+	nodeIsFrozen := nd.TempZone == model.TempZoneFrozen
 
 	for ri, r := range sol.Routes {
-		if r.LoadW+nodes[nodeIdx].Demand > r.Vehicle.CapWeight {
+		if r.LoadW+nd.Demand > r.Vehicle.CapWeight {
 			continue
 		}
-		if r.LoadV+nodes[nodeIdx].Volume > r.Vehicle.CapVolume {
+		if r.LoadV+nd.Volume > r.Vehicle.CapVolume {
+			continue
+		}
+		if nodeIsFrozen && r.Vehicle.CapFrozen > 0 && r.LoadFrozen+nd.Volume > r.Vehicle.CapFrozen {
+			continue
+		}
+		if !nodeIsFrozen && r.Vehicle.CapChilled > 0 && r.LoadChilled+nd.Volume > r.Vehicle.CapChilled {
 			continue
 		}
 		for pos := 0; pos <= len(r.Nodes); pos++ {
@@ -201,6 +217,9 @@ func tryAddNewRoute(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *
 		return false
 	}
 
+	nd := nodes[nodeIdx]
+	nodeIsFrozen := nd.TempZone == model.TempZoneFrozen
+
 	for _, v := range vehicles {
 		depotExists := false
 		for _, r := range sol.Routes {
@@ -211,12 +230,20 @@ func tryAddNewRoute(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *
 		}
 
 		if !depotExists {
+			if nodeIsFrozen && v.CapFrozen > 0 && nd.Volume > v.CapFrozen {
+				continue
+			}
+			if !nodeIsFrozen && v.CapChilled > 0 && nd.Volume > v.CapChilled {
+				continue
+			}
 			route := &model.Route{
 				Vehicle: v,
 				Nodes:   []int{nodeIdx},
 			}
 			constraint.EvaluateRoute(route, nodes, mtx)
-			if route.LoadW <= v.CapWeight && route.LoadV <= v.CapVolume {
+			if route.LoadW <= v.CapWeight && route.LoadV <= v.CapVolume &&
+				(v.CapFrozen <= 0 || route.LoadFrozen <= v.CapFrozen) &&
+				(v.CapChilled <= 0 || route.LoadChilled <= v.CapChilled) {
 				sol.Routes = append(sol.Routes, route)
 				return true
 			}
@@ -224,12 +251,20 @@ func tryAddNewRoute(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *
 	}
 
 	for _, v := range vehicles {
+		if nodeIsFrozen && v.CapFrozen > 0 && nd.Volume > v.CapFrozen {
+			continue
+		}
+		if !nodeIsFrozen && v.CapChilled > 0 && nd.Volume > v.CapChilled {
+			continue
+		}
 		route := &model.Route{
 			Vehicle: v,
 			Nodes:   []int{nodeIdx},
 		}
 		constraint.EvaluateRoute(route, nodes, mtx)
-		if route.LoadW <= v.CapWeight && route.LoadV <= v.CapVolume {
+		if route.LoadW <= v.CapWeight && route.LoadV <= v.CapVolume &&
+			(v.CapFrozen <= 0 || route.LoadFrozen <= v.CapFrozen) &&
+			(v.CapChilled <= 0 || route.LoadChilled <= v.CapChilled) {
 			sol.Routes = append(sol.Routes, route)
 			return true
 		}

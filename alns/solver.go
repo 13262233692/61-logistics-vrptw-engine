@@ -41,11 +41,13 @@ func DefaultConfig() ALNSConfig {
 }
 
 type routeSnapshot struct {
-	nodes []int
-	dist  float64
-	time  float64
-	loadW float64
-	loadV float64
+	nodes       []int
+	dist        float64
+	time        float64
+	loadW       float64
+	loadV       float64
+	loadFrozen  float64
+	loadChilled float64
 }
 
 type solutionSnapshot struct {
@@ -83,11 +85,13 @@ func (s *ALNSSolver) takeSnapshot(sol *model.Solution) *solutionSnapshot {
 		nodesCopy := make([]int, len(r.Nodes))
 		copy(nodesCopy, r.Nodes)
 		snap.routes[i] = routeSnapshot{
-			nodes: nodesCopy,
-			dist:  r.Dist,
-			time:  r.Time,
-			loadW: r.LoadW,
-			loadV: r.LoadV,
+			nodes:       nodesCopy,
+			dist:        r.Dist,
+			time:        r.Time,
+			loadW:       r.LoadW,
+			loadV:       r.LoadV,
+			loadFrozen:  r.LoadFrozen,
+			loadChilled: r.LoadChilled,
 		}
 	}
 
@@ -116,6 +120,8 @@ func (s *ALNSSolver) restoreSnapshot(sol *model.Solution, snap *solutionSnapshot
 		r.Time = rs.time
 		r.LoadW = rs.loadW
 		r.LoadV = rs.loadV
+		r.LoadFrozen = rs.loadFrozen
+		r.LoadChilled = rs.loadChilled
 	}
 
 	sol.Routes = sol.Routes[:snap.routeCount]
@@ -441,12 +447,14 @@ func (s *ALNSSolver) deepcopySolution(sol *model.Solution) *model.Solution {
 		nodes := make([]int, len(r.Nodes))
 		copy(nodes, r.Nodes)
 		newSol.Routes[i] = &model.Route{
-			Vehicle: r.Vehicle,
-			Nodes:   nodes,
-			LoadW:   r.LoadW,
-			LoadV:   r.LoadV,
-			Dist:    r.Dist,
-			Time:    r.Time,
+			Vehicle:     r.Vehicle,
+			Nodes:       nodes,
+			LoadW:       r.LoadW,
+			LoadV:       r.LoadV,
+			LoadFrozen:  r.LoadFrozen,
+			LoadChilled: r.LoadChilled,
+			Dist:        r.Dist,
+			Time:        r.Time,
 		}
 	}
 

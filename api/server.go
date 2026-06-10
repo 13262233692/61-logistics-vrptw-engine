@@ -123,13 +123,15 @@ func buildResponse(sol *model.Solution, nodes []*model.Node, iterations int) *mo
 			continue
 		}
 		resp.Routes = append(resp.Routes, model.RouteResult{
-			VehicleID:  r.Vehicle.ID,
-			DepotID:    r.Vehicle.DepotID,
-			Sequence:   seq,
-			Distance:   r.Dist,
-			Duration:   r.Time,
-			LoadWeight: r.LoadW,
-			LoadVolume: r.LoadV,
+			VehicleID:   r.Vehicle.ID,
+			DepotID:     r.Vehicle.DepotID,
+			Sequence:    seq,
+			Distance:    r.Dist,
+			Duration:    r.Time,
+			LoadWeight:  r.LoadW,
+			LoadVolume:  r.LoadV,
+			LoadFrozen:  r.LoadFrozen,
+			LoadChilled: r.LoadChilled,
 		})
 	}
 

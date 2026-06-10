@@ -7,9 +7,10 @@ import (
 )
 
 const (
-	PenaltyTW       = 10000.0
-	PenaltyCap      = 10000.0
-	PenaltyUnserved = 5000.0
+	PenaltyTW          = 10000.0
+	PenaltyCap         = 10000.0
+	PenaltyZoneCap     = 15000.0
+	PenaltyUnserved    = 5000.0
 )
 
 func BuildProblem(nodes []*model.Node, vehicles []*Vehicle, mtx *model.Matrix) *model.Problem {
@@ -39,6 +40,8 @@ func EvaluateRoute(route *model.Route, nodes []*model.Node, mtx *model.Matrix) (
 		route.Time = 0
 		route.LoadW = 0
 		route.LoadV = 0
+		route.LoadFrozen = 0
+		route.LoadChilled = 0
 		return 0, 0, 0, true
 	}
 
@@ -46,6 +49,8 @@ func EvaluateRoute(route *model.Route, nodes []*model.Node, mtx *model.Matrix) (
 	totalDist := 0.0
 	loadW := 0.0
 	loadV := 0.0
+	loadFrozen := 0.0
+	loadChilled := 0.0
 	penalty = 0.0
 	feasible = true
 
@@ -63,6 +68,21 @@ func EvaluateRoute(route *model.Route, nodes []*model.Node, mtx *model.Matrix) (
 		node := nodes[ni]
 		loadW += node.Demand
 		loadV += node.Volume
+
+		if node.TempZone == model.TempZoneFrozen {
+			loadFrozen += node.Volume
+		} else {
+			loadChilled += node.Volume
+		}
+
+		if route.Vehicle.CapFrozen > 0 && loadFrozen > route.Vehicle.CapFrozen {
+			penalty += PenaltyZoneCap * (loadFrozen - route.Vehicle.CapFrozen)
+			feasible = false
+		}
+		if route.Vehicle.CapChilled > 0 && loadChilled > route.Vehicle.CapChilled {
+			penalty += PenaltyZoneCap * (loadChilled - route.Vehicle.CapChilled)
+			feasible = false
+		}
 
 		if currentTime < node.TW.Earliest {
 			currentTime = node.TW.Earliest
@@ -90,6 +110,8 @@ func EvaluateRoute(route *model.Route, nodes []*model.Node, mtx *model.Matrix) (
 
 	route.LoadW = loadW
 	route.LoadV = loadV
+	route.LoadFrozen = loadFrozen
+	route.LoadChilled = loadChilled
 	route.Dist = totalDist
 	route.Time = totalTime
 
@@ -133,6 +155,14 @@ func InsertionCostFast(route *model.Route, pos, nodeIdx int, nodes []*model.Node
 		return math.MaxFloat64 / 4
 	}
 
+	nodeIsFrozen := node.TempZone == model.TempZoneFrozen
+	if nodeIsFrozen && route.Vehicle.CapFrozen > 0 && route.LoadFrozen+node.Volume > route.Vehicle.CapFrozen {
+		return math.MaxFloat64 / 4
+	}
+	if !nodeIsFrozen && route.Vehicle.CapChilled > 0 && route.LoadChilled+node.Volume > route.Vehicle.CapChilled {
+		return math.MaxFloat64 / 4
+	}
+
 	prev := depotIdx
 	if pos > 0 {
 		prev = route.Nodes[pos-1]
@@ -147,16 +177,25 @@ func InsertionCostFast(route *model.Route, pos, nodeIdx int, nodes []*model.Node
 	currentTime := nodes[depotIdx].TW.Earliest
 	prevNode := depotIdx
 	penalty := 0.0
+	runFrozen := 0.0
+	runChilled := 0.0
 
 	for i := 0; i < pos; i++ {
 		ni := route.Nodes[i]
-		currentTime += mtx.Time[prevNode][ni]
 		nd := nodes[ni]
+		currentTime += mtx.Time[prevNode][ni]
 		if currentTime < nd.TW.Earliest {
 			currentTime = nd.TW.Earliest
 		}
 		currentTime += nd.Service
 		prevNode = ni
+		if !nd.IsDepot {
+			if nd.TempZone == model.TempZoneFrozen {
+				runFrozen += nd.Volume
+			} else {
+				runChilled += nd.Volume
+			}
+		}
 	}
 
 	currentTime += mtx.Time[prevNode][nodeIdx]
@@ -169,19 +208,44 @@ func InsertionCostFast(route *model.Route, pos, nodeIdx int, nodes []*model.Node
 	currentTime += node.Service
 	prevNode = nodeIdx
 
+	if nodeIsFrozen {
+		runFrozen += node.Volume
+	} else {
+		runChilled += node.Volume
+	}
+
+	if route.Vehicle.CapFrozen > 0 && runFrozen > route.Vehicle.CapFrozen {
+		penalty += PenaltyZoneCap * (runFrozen - route.Vehicle.CapFrozen)
+	}
+	if route.Vehicle.CapChilled > 0 && runChilled > route.Vehicle.CapChilled {
+		penalty += PenaltyZoneCap * (runChilled - route.Vehicle.CapChilled)
+	}
+
 	for i := pos; i < len(route.Nodes); i++ {
 		ni := route.Nodes[i]
-		currentTime += mtx.Time[prevNode][ni]
 		nd := nodes[ni]
+		currentTime += mtx.Time[prevNode][ni]
 		if currentTime < nd.TW.Earliest {
 			currentTime = nd.TW.Earliest
 		}
 		if currentTime > nd.TW.Latest {
-			twViolation := currentTime - nd.TW.Latest
-			penalty += PenaltyTW * twViolation
+			penalty += PenaltyTW * (currentTime - nd.TW.Latest)
 		}
 		currentTime += nd.Service
 		prevNode = ni
+		if !nd.IsDepot {
+			if nd.TempZone == model.TempZoneFrozen {
+				runFrozen += nd.Volume
+			} else {
+				runChilled += nd.Volume
+			}
+		}
+		if route.Vehicle.CapFrozen > 0 && runFrozen > route.Vehicle.CapFrozen {
+			penalty += PenaltyZoneCap * (runFrozen - route.Vehicle.CapFrozen)
+		}
+		if route.Vehicle.CapChilled > 0 && runChilled > route.Vehicle.CapChilled {
+			penalty += PenaltyZoneCap * (runChilled - route.Vehicle.CapChilled)
+		}
 	}
 
 	return distDelta + penalty
