@@ -25,6 +25,37 @@ var DestroyOps = [DestroyCount]DestroyFunc{
 	DestroyRandom: RandomRemove,
 }
 
+type cachedMetrics struct {
+	maxDist   float64
+	maxTWW    float64
+	distScale float64
+	twScale   float64
+}
+
+func buildCachedMetrics(nodes []*model.Node, mtx *model.Matrix) cachedMetrics {
+	cm := cachedMetrics{maxDist: 1, maxTWW: 1}
+	for i := 0; i < mtx.N; i++ {
+		for j := 0; j < mtx.N; j++ {
+			if mtx.Dist[i][j] > cm.maxDist {
+				cm.maxDist = mtx.Dist[i][j]
+			}
+		}
+	}
+	for _, n := range nodes {
+		w := n.TW.Latest - n.TW.Earliest
+		if w > cm.maxTWW {
+			cm.maxTWW = w
+		}
+	}
+	if cm.maxDist > 0 {
+		cm.distScale = 1.0 / cm.maxDist
+	}
+	if cm.maxTWW > 0 {
+		cm.twScale = 1.0 / cm.maxTWW
+	}
+	return cm
+}
+
 func ShawRemove(sol *model.Solution, nodes []*model.Node, mtx *model.Matrix, rng *rand.Rand, q int) []int {
 	customers := collectCustomers(sol, nodes)
 	if len(customers) == 0 {
@@ -33,6 +64,8 @@ func ShawRemove(sol *model.Solution, nodes []*model.Node, mtx *model.Matrix, rng
 	if q > len(customers) {
 		q = len(customers)
 	}
+
+	cm := buildCachedMetrics(nodes, mtx)
 
 	seed := customers[rng.Intn(len(customers))]
 	removed := []int{seed}
@@ -48,11 +81,13 @@ func ShawRemove(sol *model.Solution, nodes []*model.Node, mtx *model.Matrix, rng
 	for len(removed) < q && len(remaining) > 0 {
 		rIdx := removed[rng.Intn(len(removed))]
 		bestIdx := 0
-		bestSim := -1.0
+		bestSim := math.MaxFloat64
 
 		for i, c := range remaining {
-			sim := shawSimilarity(rIdx, c, nodes, mtx)
-			if sim > bestSim {
+			di := mtx.Dist[rIdx][c] * cm.distScale
+			ti := math.Abs(nodes[rIdx].TW.Earliest-nodes[c].TW.Earliest) * cm.twScale
+			sim := di + ti
+			if sim < bestSim {
 				bestSim = sim
 				bestIdx = i
 			}
@@ -65,44 +100,6 @@ func ShawRemove(sol *model.Solution, nodes []*model.Node, mtx *model.Matrix, rng
 	}
 
 	return removed
-}
-
-func shawSimilarity(i, j int, nodes []*model.Node, mtx *model.Matrix) float64 {
-	di := mtx.Dist[i][j]
-	ti := math.Abs(nodes[i].TW.Earliest - nodes[j].TW.Earliest)
-	diNorm := di / maxRouteDist(mtx)
-	tiNorm := ti / maxTWWidth(nodes)
-
-	return -(diNorm + tiNorm)
-}
-
-func maxRouteDist(mtx *model.Matrix) float64 {
-	mx := 0.0
-	for i := 0; i < mtx.N; i++ {
-		for j := 0; j < mtx.N; j++ {
-			if mtx.Dist[i][j] > mx {
-				mx = mtx.Dist[i][j]
-			}
-		}
-	}
-	if mx == 0 {
-		return 1
-	}
-	return mx
-}
-
-func maxTWWidth(nodes []*model.Node) float64 {
-	mx := 0.0
-	for _, n := range nodes {
-		w := n.TW.Latest - n.TW.Earliest
-		if w > mx {
-			mx = w
-		}
-	}
-	if mx == 0 {
-		return 1
-	}
-	return mx
 }
 
 func WorstRemove(sol *model.Solution, nodes []*model.Node, mtx *model.Matrix, rng *rand.Rand, q int) []int {
@@ -141,7 +138,7 @@ func WorstRemove(sol *model.Solution, nodes []*model.Node, mtx *model.Matrix, rn
 			return costs[i].cost > costs[j].cost
 		})
 
-		p := rng.Intn(min(5, len(costs)))
+		p := rng.Intn(minInt(5, len(costs)))
 		chosen := costs[p].node
 		removed = append(removed, chosen)
 		removeFromSolution(sol, chosen)
@@ -193,22 +190,13 @@ func RandomRemove(sol *model.Solution, nodes []*model.Node, mtx *model.Matrix, r
 	return removed
 }
 
-func collectServed(sol *model.Solution) []int {
-	served := make([]int, 0)
+func collectCustomers(sol *model.Solution, nodes []*model.Node) []int {
+	customers := make([]int, 0)
 	for _, r := range sol.Routes {
 		for _, n := range r.Nodes {
-			served = append(served, n)
-		}
-	}
-	return served
-}
-
-func collectCustomers(sol *model.Solution, nodes []*model.Node) []int {
-	served := collectServed(sol)
-	customers := make([]int, 0, len(served))
-	for _, s := range served {
-		if !nodes[s].IsDepot {
-			customers = append(customers, s)
+			if !nodes[n].IsDepot {
+				customers = append(customers, n)
+			}
 		}
 	}
 	return customers
@@ -229,14 +217,17 @@ func removeFromSolution(sol *model.Solution, nodeID int) {
 	for _, r := range sol.Routes {
 		for i, n := range r.Nodes {
 			if n == nodeID {
-				r.Nodes = append(r.Nodes[:i], r.Nodes[i+1:]...)
+				newNodes := make([]int, 0, len(r.Nodes)-1)
+				newNodes = append(newNodes, r.Nodes[:i]...)
+				newNodes = append(newNodes, r.Nodes[i+1:]...)
+				r.Nodes = newNodes
 				return
 			}
 		}
 	}
 }
 
-func min(a, b int) int {
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}

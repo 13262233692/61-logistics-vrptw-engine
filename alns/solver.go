@@ -3,6 +3,7 @@ package alns
 import (
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/logistics/vrptw-engine/constraint"
@@ -10,21 +11,21 @@ import (
 )
 
 const (
-	SegmentSize    = 50
-	WeightDecay    = 0.8
-	ScoreNewBest   = 10.0
-	ScoreBetter    = 5.0
-	ScoreAccepted  = 1.0
+	SegmentSize   = 50
+	WeightDecay   = 0.8
+	ScoreNewBest  = 10.0
+	ScoreBetter   = 5.0
+	ScoreAccepted = 1.0
 )
 
 type ALNSConfig struct {
-	MaxIter      int
-	MaxTimeMs    int64
-	StartTemp    float64
-	CoolRate     float64
-	MinRemove    int
-	MaxRemove    int
-	Seed         int64
+	MaxIter   int
+	MaxTimeMs int64
+	StartTemp float64
+	CoolRate  float64
+	MinRemove int
+	MaxRemove int
+	Seed      int64
 }
 
 func DefaultConfig() ALNSConfig {
@@ -39,13 +40,173 @@ func DefaultConfig() ALNSConfig {
 	}
 }
 
+type routeSnapshot struct {
+	nodes []int
+	dist  float64
+	time  float64
+	loadW float64
+	loadV float64
+}
+
+type solutionSnapshot struct {
+	routes      []routeSnapshot
+	routeCount  int
+	unserved    []int
+	totalDist   float64
+	totalTime   float64
+	feasible    bool
+}
+
+var snapshotPool = sync.Pool{
+	New: func() interface{} {
+		rs := make([]routeSnapshot, 0, 128)
+		return &solutionSnapshot{
+			routes: rs,
+		}
+	},
+}
+
+func (s *ALNSSolver) takeSnapshot(sol *model.Solution) *solutionSnapshot {
+	snap := snapshotPool.Get().(*solutionSnapshot)
+	snap.routeCount = len(sol.Routes)
+	snap.totalDist = sol.TotalDist
+	snap.totalTime = sol.TotalTime
+	snap.feasible = sol.Feasible
+
+	if cap(snap.routes) < len(sol.Routes) {
+		snap.routes = make([]routeSnapshot, len(sol.Routes))
+	} else {
+		snap.routes = snap.routes[:len(sol.Routes)]
+	}
+
+	for i, r := range sol.Routes {
+		nodesCopy := make([]int, len(r.Nodes))
+		copy(nodesCopy, r.Nodes)
+		snap.routes[i] = routeSnapshot{
+			nodes: nodesCopy,
+			dist:  r.Dist,
+			time:  r.Time,
+			loadW: r.LoadW,
+			loadV: r.LoadV,
+		}
+	}
+
+	if cap(snap.unserved) < len(sol.Unserved) {
+		snap.unserved = make([]int, len(sol.Unserved))
+	} else {
+		snap.unserved = snap.unserved[:len(sol.Unserved)]
+	}
+	copy(snap.unserved, sol.Unserved)
+
+	return snap
+}
+
+func (s *ALNSSolver) restoreSnapshot(sol *model.Solution, snap *solutionSnapshot) {
+	for i := 0; i < snap.routeCount && i < len(sol.Routes); i++ {
+		rs := &snap.routes[i]
+		r := sol.Routes[i]
+		if cap(r.Nodes) >= len(rs.nodes) {
+			r.Nodes = r.Nodes[:len(rs.nodes)]
+			copy(r.Nodes, rs.nodes)
+		} else {
+			r.Nodes = make([]int, len(rs.nodes))
+			copy(r.Nodes, rs.nodes)
+		}
+		r.Dist = rs.dist
+		r.Time = rs.time
+		r.LoadW = rs.loadW
+		r.LoadV = rs.loadV
+	}
+
+	sol.Routes = sol.Routes[:snap.routeCount]
+	sol.TotalDist = snap.totalDist
+	sol.TotalTime = snap.totalTime
+	sol.Feasible = snap.feasible
+
+	if cap(sol.Unserved) >= len(snap.unserved) {
+		sol.Unserved = sol.Unserved[:len(snap.unserved)]
+		copy(sol.Unserved, snap.unserved)
+	} else {
+		sol.Unserved = make([]int, len(snap.unserved))
+		copy(sol.Unserved, snap.unserved)
+	}
+
+	s.releaseSnapshot(snap)
+}
+
+func (s *ALNSSolver) releaseSnapshot(snap *solutionSnapshot) {
+	snap.routes = snap.routes[:0]
+	snap.unserved = snap.unserved[:0]
+	snapshotPool.Put(snap)
+}
+
+func (s *ALNSSolver) findDirtyRoutes(sol *model.Solution, snap *solutionSnapshot) []int {
+	dirty := make([]int, 0, 8)
+	minLen := len(snap.routes)
+	if len(sol.Routes) < minLen {
+		minLen = len(sol.Routes)
+	}
+	for i := 0; i < minLen; i++ {
+		rs := &snap.routes[i]
+		r := sol.Routes[i]
+		if len(r.Nodes) != len(rs.nodes) {
+			dirty = append(dirty, i)
+			continue
+		}
+		for j := range r.Nodes {
+			if r.Nodes[j] != rs.nodes[j] {
+				dirty = append(dirty, i)
+				break
+			}
+		}
+	}
+	for i := minLen; i < len(sol.Routes); i++ {
+		dirty = append(dirty, i)
+	}
+	return dirty
+}
+
+func (s *ALNSSolver) evaluateDelta(sol *model.Solution, snap *solutionSnapshot) float64 {
+	dirty := s.findDirtyRoutes(sol, snap)
+
+	totalDist := snap.totalDist
+	totalPenalty := 0.0
+	sol.Feasible = true
+
+	for _, idx := range dirty {
+		if idx < len(snap.routes) {
+			totalDist -= snap.routes[idx].dist
+		}
+	}
+
+	for _, idx := range dirty {
+		if idx < len(sol.Routes) {
+			r := sol.Routes[idx]
+			d, _, p, f := constraint.EvaluateRoute(r, s.Nodes, s.Matrix)
+			totalDist += d
+			totalPenalty += p
+			if !f {
+				sol.Feasible = false
+			}
+		}
+	}
+
+	totalPenalty += constraint.PenaltyUnserved * float64(len(sol.Unserved))
+	if len(sol.Unserved) > 0 {
+		sol.Feasible = false
+	}
+
+	sol.TotalDist = totalDist
+	return totalDist + totalPenalty
+}
+
 type ALNSSolver struct {
-	Config     ALNSConfig
-	Nodes      []*model.Node
-	Vehicles   []*model.Vehicle
-	Matrix     *model.Matrix
-	Depots     []*model.Node
-	Rng        *rand.Rand
+	Config   ALNSConfig
+	Nodes    []*model.Node
+	Vehicles []*model.Vehicle
+	Matrix   *model.Matrix
+	Depots   []*model.Node
+	Rng      *rand.Rand
 
 	destroyWeights []float64
 	repairWeights  []float64
@@ -96,7 +257,7 @@ func NewALNSSolver(prob *model.Problem, cfg ALNSConfig) *ALNSSolver {
 func (s *ALNSSolver) Solve() *model.Solution {
 	s.currSol = s.initialSolution()
 	s.currCost = constraint.EvaluateSolution(s.currSol, s.Nodes, s.Matrix)
-	s.bestSol = s.copySolution(s.currSol)
+	s.bestSol = s.deepcopySolution(s.currSol)
 	s.bestCost = s.currCost
 
 	temperature := s.Config.StartTemp
@@ -110,37 +271,46 @@ func (s *ALNSSolver) Solve() *model.Solution {
 		s.iterations = iter + 1
 
 		q := s.Rng.Intn(s.Config.MaxRemove-s.Config.MinRemove+1) + s.Config.MinRemove
-		if q > len(s.currSol.Unserved)+countServed(s.currSol) {
-			q = len(s.currSol.Unserved) + countServed(s.currSol)
+		served := countServed(s.currSol)
+		if q > len(s.currSol.Unserved)+served {
+			q = len(s.currSol.Unserved) + served
 		}
 
-		newSol := s.copySolution(s.currSol)
+		snap := s.takeSnapshot(s.currSol)
 
 		dIdx := s.selectOperator(s.destroyWeights)
 		rIdx := s.selectOperator(s.repairWeights)
 
-		allRemoved := append([]int{}, newSol.Unserved...)
-		destroyed := DestroyOps[dIdx](newSol, s.Nodes, s.Matrix, s.Rng, q)
+		destroyed := DestroyOps[dIdx](s.currSol, s.Nodes, s.Matrix, s.Rng, q)
+		allRemoved := make([]int, 0, len(s.currSol.Unserved)+len(destroyed))
+		allRemoved = append(allRemoved, s.currSol.Unserved...)
 		allRemoved = append(allRemoved, destroyed...)
 
-		RepairOps[rIdx](newSol, allRemoved, s.Nodes, s.Matrix, s.Vehicles, s.Depots, s.Rng)
+		RepairOps[rIdx](s.currSol, allRemoved, s.Nodes, s.Matrix, s.Vehicles, s.Depots, s.Rng)
 
-		newCost := constraint.EvaluateSolution(newSol, s.Nodes, s.Matrix)
+		newCost := s.evaluateDelta(s.currSol, snap)
 
 		score := 0.0
+		accepted := false
+
 		if newCost < s.bestCost {
 			score = ScoreNewBest
-			s.bestSol = s.copySolution(newSol)
+			s.bestSol = s.deepcopySolution(s.currSol)
 			s.bestCost = newCost
+			accepted = true
 		} else if newCost < s.currCost {
 			score = ScoreBetter
+			accepted = true
 		} else if acceptWorse(newCost, s.currCost, temperature, s.Rng) {
 			score = ScoreAccepted
+			accepted = true
 		}
 
-		if newCost < s.currCost || acceptWorse(newCost, s.currCost, temperature, s.Rng) {
-			s.currSol = newSol
+		if accepted {
 			s.currCost = newCost
+			s.releaseSnapshot(snap)
+		} else {
+			s.restoreSnapshot(s.currSol, snap)
 		}
 
 		s.destroyScores[dIdx] += score
@@ -259,7 +429,7 @@ func (s *ALNSSolver) initialSolution() *model.Solution {
 	return sol
 }
 
-func (s *ALNSSolver) copySolution(sol *model.Solution) *model.Solution {
+func (s *ALNSSolver) deepcopySolution(sol *model.Solution) *model.Solution {
 	newSol := &model.Solution{
 		TotalDist: sol.TotalDist,
 		TotalTime: sol.TotalTime,

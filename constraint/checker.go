@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	PenaltyTW      = 10000.0
-	PenaltyCap     = 10000.0
+	PenaltyTW       = 10000.0
+	PenaltyCap      = 10000.0
 	PenaltyUnserved = 5000.0
 )
 
@@ -37,12 +37,13 @@ func EvaluateRoute(route *model.Route, nodes []*model.Node, mtx *model.Matrix) (
 	if len(route.Nodes) == 0 {
 		route.Dist = 0
 		route.Time = 0
+		route.LoadW = 0
+		route.LoadV = 0
 		return 0, 0, 0, true
 	}
 
 	depotIdx := route.Vehicle.DepotID
 	totalDist := 0.0
-	totalTime := 0.0
 	loadW := 0.0
 	loadV := 0.0
 	penalty = 0.0
@@ -57,8 +58,7 @@ func EvaluateRoute(route *model.Route, nodes []*model.Node, mtx *model.Matrix) (
 		}
 
 		totalDist += mtx.Dist[prev][ni]
-		travelTime := mtx.Time[prev][ni]
-		currentTime += travelTime
+		currentTime += mtx.Time[prev][ni]
 
 		node := nodes[ni]
 		loadW += node.Demand
@@ -68,8 +68,7 @@ func EvaluateRoute(route *model.Route, nodes []*model.Node, mtx *model.Matrix) (
 			currentTime = node.TW.Earliest
 		}
 		if currentTime > node.TW.Latest {
-			twViolation := currentTime - node.TW.Latest
-			penalty += PenaltyTW * twViolation
+			penalty += PenaltyTW * (currentTime - node.TW.Latest)
 			feasible = false
 		}
 
@@ -78,7 +77,7 @@ func EvaluateRoute(route *model.Route, nodes []*model.Node, mtx *model.Matrix) (
 	}
 
 	totalDist += mtx.Dist[prev][depotIdx]
-	totalTime = currentTime + mtx.Time[prev][depotIdx] - nodes[depotIdx].TW.Earliest
+	totalTime := currentTime + mtx.Time[prev][depotIdx] - nodes[depotIdx].TW.Earliest
 
 	if loadW > route.Vehicle.CapWeight {
 		penalty += PenaltyCap * (loadW - route.Vehicle.CapWeight)
@@ -123,44 +122,73 @@ func EvaluateSolution(sol *model.Solution, nodes []*model.Node, mtx *model.Matri
 	return totalDist + totalPenalty
 }
 
-func InsertionCost(route *model.Route, pos, nodeIdx int, nodes []*model.Node, mtx *model.Matrix) float64 {
-	newNodes := make([]int, 0, len(route.Nodes)+1)
-	newNodes = append(newNodes, route.Nodes[:pos]...)
-	newNodes = append(newNodes, nodeIdx)
-	newNodes = append(newNodes, route.Nodes[pos:]...)
+func InsertionCostFast(route *model.Route, pos, nodeIdx int, nodes []*model.Node, mtx *model.Matrix) float64 {
+	depotIdx := route.Vehicle.DepotID
+	node := nodes[nodeIdx]
 
-	tmpRoute := &model.Route{
-		Vehicle: route.Vehicle,
-		Nodes:   newNodes,
+	if route.LoadW+node.Demand > route.Vehicle.CapWeight {
+		return math.MaxFloat64 / 4
+	}
+	if route.LoadV+node.Volume > route.Vehicle.CapVolume {
+		return math.MaxFloat64 / 4
 	}
 
-	dist, _, penalty, _ := EvaluateRoute(tmpRoute, nodes, mtx)
-	oldDist := route.Dist
+	prev := depotIdx
+	if pos > 0 {
+		prev = route.Nodes[pos-1]
+	}
+	next := depotIdx
+	if pos < len(route.Nodes) {
+		next = route.Nodes[pos]
+	}
 
-	return (dist - oldDist) + penalty
+	distDelta := mtx.Dist[prev][nodeIdx] + mtx.Dist[nodeIdx][next] - mtx.Dist[prev][next]
+
+	currentTime := nodes[depotIdx].TW.Earliest
+	prevNode := depotIdx
+	penalty := 0.0
+
+	for i := 0; i < pos; i++ {
+		ni := route.Nodes[i]
+		currentTime += mtx.Time[prevNode][ni]
+		nd := nodes[ni]
+		if currentTime < nd.TW.Earliest {
+			currentTime = nd.TW.Earliest
+		}
+		currentTime += nd.Service
+		prevNode = ni
+	}
+
+	currentTime += mtx.Time[prevNode][nodeIdx]
+	if currentTime < node.TW.Earliest {
+		currentTime = node.TW.Earliest
+	}
+	if currentTime > node.TW.Latest {
+		penalty += PenaltyTW * (currentTime - node.TW.Latest)
+	}
+	currentTime += node.Service
+	prevNode = nodeIdx
+
+	for i := pos; i < len(route.Nodes); i++ {
+		ni := route.Nodes[i]
+		currentTime += mtx.Time[prevNode][ni]
+		nd := nodes[ni]
+		if currentTime < nd.TW.Earliest {
+			currentTime = nd.TW.Earliest
+		}
+		if currentTime > nd.TW.Latest {
+			twViolation := currentTime - nd.TW.Latest
+			penalty += PenaltyTW * twViolation
+		}
+		currentTime += nd.Service
+		prevNode = ni
+	}
+
+	return distDelta + penalty
 }
 
-func CanInsert(route *model.Route, pos, nodeIdx int, nodes []*model.Node, mtx *model.Matrix) bool {
-	newNodes := make([]int, 0, len(route.Nodes)+1)
-	newNodes = append(newNodes, route.Nodes[:pos]...)
-	newNodes = append(newNodes, nodeIdx)
-	newNodes = append(newNodes, route.Nodes[pos:]...)
-
-	loadW := route.LoadW + nodes[nodeIdx].Demand
-	loadV := route.LoadV + nodes[nodeIdx].Volume
-	if loadW > route.Vehicle.CapWeight || loadV > route.Vehicle.CapVolume {
-		return false
-	}
-
-	tmpRoute := &model.Route{
-		Vehicle: route.Vehicle,
-		Nodes:   newNodes,
-		LoadW:   loadW,
-		LoadV:   loadV,
-	}
-
-	_, _, _, feasible := EvaluateRoute(tmpRoute, nodes, mtx)
-	return feasible
+func InsertionCost(route *model.Route, pos, nodeIdx int, nodes []*model.Node, mtx *model.Matrix) float64 {
+	return InsertionCostFast(route, pos, nodeIdx, nodes, mtx)
 }
 
 func NearestDepot(nodeIdx int, nodes []*model.Node, depots []*model.Node, mtx *model.Matrix) int {

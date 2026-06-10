@@ -4,9 +4,10 @@ import (
 	"math"
 	"math/rand"
 	"sort"
+	"sync"
 
-	"github.com/logistics/vrptw-engine/model"
 	"github.com/logistics/vrptw-engine/constraint"
+	"github.com/logistics/vrptw-engine/model"
 )
 
 type RepairOperator int
@@ -28,6 +29,22 @@ type insertPos struct {
 	routeIdx int
 	pos      int
 	cost     float64
+}
+
+var insertPosPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]insertPos, 0, 512)
+		return &buf
+	},
+}
+
+func getInsertPosBuf() *[]insertPos {
+	return insertPosPool.Get().(*[]insertPos)
+}
+
+func putInsertPosBuf(buf *[]insertPos) {
+	*buf = (*buf)[:0]
+	insertPosPool.Put(buf)
 }
 
 func GreedyInsert(sol *model.Solution, removed []int, nodes []*model.Node, mtx *model.Matrix, vehicles []*model.Vehicle, depots []*model.Node, rng *rand.Rand) {
@@ -83,7 +100,8 @@ func RegretInsert(sol *model.Solution, removed []int, nodes []*model.Node, mtx *
 		bestInsertForNode := insertPos{routeIdx: -1, pos: -1, cost: math.MaxFloat64}
 
 		for _, nodeIdx := range removed {
-			inserts := findAllInserts(sol, nodeIdx, nodes, mtx)
+			buf := getInsertPosBuf()
+			inserts := findAllInsertsBuf(sol, nodeIdx, nodes, mtx, buf)
 			regret := computeRegret(inserts)
 
 			if regret > bestRegret || (regret == bestRegret && len(inserts) > 0 && inserts[0].cost < bestInsertForNode.cost) {
@@ -93,6 +111,8 @@ func RegretInsert(sol *model.Solution, removed []int, nodes []*model.Node, mtx *
 					bestInsertForNode = inserts[0]
 				}
 			}
+
+			putInsertPosBuf(buf)
 		}
 
 		if bestInsertForNode.routeIdx == -1 {
@@ -116,8 +136,14 @@ func findBestInsert(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *
 	best := insertPos{routeIdx: -1, pos: -1, cost: math.MaxFloat64}
 
 	for ri, r := range sol.Routes {
+		if r.LoadW+nodes[nodeIdx].Demand > r.Vehicle.CapWeight {
+			continue
+		}
+		if r.LoadV+nodes[nodeIdx].Volume > r.Vehicle.CapVolume {
+			continue
+		}
 		for pos := 0; pos <= len(r.Nodes); pos++ {
-			cost := constraint.InsertionCost(r, pos, nodeIdx, nodes, mtx)
+			cost := constraint.InsertionCostFast(r, pos, nodeIdx, nodes, mtx)
 			if cost < best.cost {
 				best = insertPos{routeIdx: ri, pos: pos, cost: cost}
 			}
@@ -127,12 +153,18 @@ func findBestInsert(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *
 	return best
 }
 
-func findAllInserts(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *model.Matrix) []insertPos {
-	var inserts []insertPos
+func findAllInsertsBuf(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *model.Matrix, buf *[]insertPos) []insertPos {
+	inserts := (*buf)[:0]
 
 	for ri, r := range sol.Routes {
+		if r.LoadW+nodes[nodeIdx].Demand > r.Vehicle.CapWeight {
+			continue
+		}
+		if r.LoadV+nodes[nodeIdx].Volume > r.Vehicle.CapVolume {
+			continue
+		}
 		for pos := 0; pos <= len(r.Nodes); pos++ {
-			cost := constraint.InsertionCost(r, pos, nodeIdx, nodes, mtx)
+			cost := constraint.InsertionCostFast(r, pos, nodeIdx, nodes, mtx)
 			inserts = append(inserts, insertPos{routeIdx: ri, pos: pos, cost: cost})
 		}
 	}
@@ -207,10 +239,10 @@ func tryAddNewRoute(sol *model.Solution, nodeIdx int, nodes []*model.Node, mtx *
 }
 
 func insertAt(slice []int, pos, val int) []int {
-	result := make([]int, 0, len(slice)+1)
-	result = append(result, slice[:pos]...)
-	result = append(result, val)
-	result = append(result, slice[pos:]...)
+	result := make([]int, len(slice)+1)
+	copy(result, slice[:pos])
+	result[pos] = val
+	copy(result[pos+1:], slice[pos:])
 	return result
 }
 
